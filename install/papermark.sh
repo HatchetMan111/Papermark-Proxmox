@@ -82,7 +82,14 @@ DEBUG="${DEBUG:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 
 TMP_DIR=""
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "")"
+# Nur aus einem echten Skriptpfad ableiten: bei `bash -c "$(wget …)" --opt`
+# ist $0 die Option selbst – dirname würde dann meckern.
+SCRIPT_DIR=""
+if [[ "${BASH_SOURCE[0]:-}" == -* ]]; then
+    SCRIPT_DIR=""
+elif [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo "")"
+fi
 LOG_FILE="/tmp/${APP_NAME}-installer-$(date +%Y%m%d-%H%M%S).log"
 ONE_LINER="bash -c \"\$(wget -qLO - https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_REF}/install/${APP_NAME}.sh)\""
 
