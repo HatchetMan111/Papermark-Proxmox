@@ -116,8 +116,13 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # ── 1. Grundpakete ────────────────────────────────────────────────────────
 step "1/9 Grundpakete installieren"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y --no-install-recommends \
+# Grube aus früheren LXC-Läufen (n8n/ZeitTracking): apt läuft als _apt und stolpert
+# über Resolver-Dateien, die es nicht lesen darf → Sandbox hart auf root stellen.
+# Das ist in Einweg-Containern vertretbar und verhindert den Totalabbruch.
+APT_OPTS=(-o APT::Sandbox::User=root)
+chmod 0644 /etc/resolv.conf 2>/dev/null || true
+apt-get "${APT_OPTS[@]}" update -qq
+apt-get "${APT_OPTS[@]}" install -y --no-install-recommends \
     ca-certificates curl wget gnupg git openssl xz-utils tar \
     postgresql redis-server
 systemctl enable postgresql redis-server >/dev/null 2>&1 || true
