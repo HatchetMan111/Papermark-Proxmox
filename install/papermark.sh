@@ -463,20 +463,48 @@ preflight() {
 
 push_inner_script() {
     local ct_id="$1"
-    local local_inner=""
+    local local_inner="" tmp_inner=""
+    local url="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_REF}/install/${APP_NAME}-inner.sh"
+
+    # 1) Bevorzugt aus einem Checkout (dann ist kein Netz nötig)
     if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/${APP_NAME}-inner.sh" ]]; then
         local_inner="$SCRIPT_DIR/${APP_NAME}-inner.sh"
     fi
-    if [[ -n "$local_inner" ]]; then
-        # Aus einem Checkout: direkt in den Container schieben (kein Netz nötig)
-        info "Übertrage ${APP_NAME}-inner.sh aus ${local_inner}"
-        run pct push "$ct_id" "$local_inner" "/tmp/${APP_NAME}-inner.sh"
-    else
-        # Aus dem Repo: im Container per curl holen (inkl. Cache-Buster)
-        local url="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_REF}/install/${APP_NAME}-inner.sh"
-        info "Lade ${APP_NAME}-inner.sh im Container: ${url}"
-        run pct exec "$ct_id" -- bash -lc "curl -fsSL --retry 3 --max-time 120 -o /tmp/${APP_NAME}-inner.sh '${url}?cb=\$(date +%s)'"
+
+    # 2) Sonst auf dem HOST laden und per pct push schieben.
+    #    Live-Grube (CT 211, 2026-11-22): das nackte Debian-Template hat KEIN
+    #    curl – ein Download im Container scheitert mit "curl: command not
+    #    found", bevor das Inner-Skript überhaupt apt/curl installieren könnte.
+    if [[ -z "$local_inner" ]]; then
+        tmp_inner="$(mktemp "/tmp/${APP_NAME}-inner.XXXXXX")"
+        info "Lade ${APP_NAME}-inner.sh auf dem Proxmox-Host: ${url}"
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL --retry 3 --max-time 120 -o "$tmp_inner" "$url" || true
+        elif command -v wget >/dev/null 2>&1; then
+            wget -q -T 60 -O "$tmp_inner" "$url" || true
+        else
+            rm -f "$tmp_inner"
+            die "Weder curl noch wget auf dem Proxmox-Host – bitte aus einem Checkout starten (--help)."
+        fi
+        if [[ -s "$tmp_inner" ]] && head -1 "$tmp_inner" | grep -q '^#!/usr/bin/env bash'; then
+            local_inner="$tmp_inner"
+        else
+            rm -f "$tmp_inner"
+            # Letzter Ausweg: curl im Container nachinstallieren (falls der Host
+            # offline ist, der CT aber ins Netz kommt).
+            warn "Konnte das Inner-Skript nicht auf dem Host laden – installiere curl im Container ..."
+            pct exec "$ct_id" -- bash -lc 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1; apt-get install -y --no-install-recommends curl ca-certificates >/dev/null 2>&1'
+            if ! pct exec "$ct_id" -- bash -lc "curl -fsSL --retry 3 --max-time 120 -o /tmp/${APP_NAME}-inner.sh '${url}?cb=\$(date +%s)'"; then
+                die "Inner-Skript konnte weder auf dem Host noch im Container geladen werden: ${url}"
+            fi
+            run pct exec "$ct_id" -- chmod 0700 "/tmp/${APP_NAME}-inner.sh"
+            return 0
+        fi
     fi
+
+    info "Übertrage ${APP_NAME}-inner.sh in den Container (${ct_id})"
+    run pct push "$ct_id" "$local_inner" "/tmp/${APP_NAME}-inner.sh"
+    [[ -z "$tmp_inner" ]] || rm -f "$tmp_inner"
     run pct exec "$ct_id" -- chmod 0700 "/tmp/${APP_NAME}-inner.sh"
 }
 
@@ -548,13 +576,24 @@ do_install() {
         die "Container ${CT_ID} existiert bereits.\n  Andere ID wählen (--id) oder --force (löscht den Container!)"
     fi
     if ct_exists "$CT_HOSTNAME"; then
+        local old_id; old_id="$(find_ct_id_by_hostname)"
         if [[ "$FORCE_RECREATE" == "true" ]]; then
-            local old; old="$(find_ct_id_by_hostname)"
-            warn "Container '${CT_HOSTNAME}' (${old}) existiert – wird mit --force gelöscht ..."
-            run pct stop "$old" || true
-            run pct destroy "$old" --purge
+            warn "Container '${CT_HOSTNAME}' (${old_id}) wird mit --force gelöscht und neu angelegt ..."
+            run pct stop "$old_id" || true
+            run pct destroy "$old_id" --purge
+        elif [[ -n "$old_id" ]] && pct exec "$old_id" -- test -f /etc/papermark/s3.env >/dev/null 2>&1; then
+            # Idempotenz: im Container steckt schon eine Papermark-Installation
+            # (Marker = /etc/papermark/s3.env) → dort fortsetzen/aktualisieren.
+            warn "Container '${CT_HOSTNAME}' (${old_id}) enthält bereits Papermark – Installation wird dort fortgesetzt."
+            CT_ID="$old_id"
+            ensure_ct_running "$CT_ID"
+            push_inner_script "$CT_ID"
+            run_inner_script "$CT_ID" 0
+            verify_install "$CT_ID"
+            print_summary
+            return 0
         else
-            die "Hostname '${CT_HOSTNAME}' ist bereits vergeben ($(find_ct_id_by_hostname)).\n  --hostname NAME oder --force verwenden."
+            die "Hostname '${CT_HOSTNAME}' ist bereits vergeben (Container ${old_id:-?}).\n  Neu anlegen (löscht den Container):  --force\n  Andere ID verwenden:                  --id <freie ID> --hostname <anderer Name>\n  Vorhandene Installation fortsetzen:   einfach erneut ausführen, sobald /etc/papermark/s3.env existiert."
         fi
     fi
 
@@ -610,6 +649,10 @@ do_install() {
     run_inner_script "$CT_ID" 0
     verify_install "$CT_ID"
 
+    print_summary
+}
+
+print_summary() {
     header "Fertig 🎉"
     echo -e "  ${BOLD}Web-UI${NC}:        http://${CT_IP_FINAL}:${UI_PORT}"
     echo -e "  ${BOLD}Login-Codes${NC}:    http://${CT_IP_FINAL}:${MAILPIT_WEB_PORT}  (Mailpit-Postfach)"

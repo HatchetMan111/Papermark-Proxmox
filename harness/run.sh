@@ -13,6 +13,7 @@ set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 REPO="$(dirname "$HERE")"
+APP_NAME="papermark"
 SCRIPT="$REPO/install/papermark.sh"
 INNER="$REPO/install/papermark-inner.sh"
 
@@ -89,6 +90,11 @@ case "$cmd" in
       exit 0
     fi
     case "$*" in
+      *"test -f /etc/papermark/s3.env"*)
+        # Marker für "im Container steckt schon Papermark"
+        [[ -f "$HS/has_marker" ]] && exit 0
+        exit 1
+        ;;
       *"hostname -I"*)                   echo "$PAPERMARK_HARNESS_IP" ;;
       *"systemctl is-active papermark"*) echo "active" ;;
       *"curl -s -o /dev/null -w"*)       echo "200" ;;
@@ -130,6 +136,22 @@ cat > "$BIN/pveversion" <<'MOCK'
 #!/usr/bin/env bash
 echo "pveversion $*" >> "$PAPERMARK_HARNESS_STATE/calls.log"
 echo "pve-manager: 8.4.1"
+MOCK
+
+cat > "$BIN/curl" <<'MOCK'
+#!/usr/bin/env bash
+# Mock: kopiert ein lokales Fixture als "Download" (kein Netz im Harness)
+HS="$PAPERMARK_HARNESS_STATE"
+out=""
+prev=""
+for a in "$@"; do
+    [[ "$prev" == "-o" ]] && out="$a"
+    prev="$a"
+done
+if [[ -n "$out" ]]; then
+    cp "$HS/fake-inner.sh" "$out" 2>/dev/null || printf '#!/usr/bin/env bash\n' > "$out"
+fi
+exit 0
 MOCK
 
 chmod +x "$BIN"/*
@@ -291,6 +313,41 @@ echo "pveam \$*" >> "\$HS/calls.log"
 echo "local:vztmpl/debian-13-standard_13.0-1_${HOST_ARCH}.tar.zst   210MB"
 MOCK
     chmod +x "$BIN/pveam"
+fi
+
+# ── 11b. Idempotenz: Container mit vorhandener Installation wiederverwenden ─
+reset_state
+echo "211 running webserver papermark" >> "$HS/ct_list"
+: > "$HS/has_marker"
+t "Idempotenter Re-Run"
+run_script --yes
+assert_exit 0 "$(cat "$DIR/rc")"
+assert_out "enthält bereits Papermark"
+assert_calls 1 "papermark-inner.sh"
+if /bin/grep -q "pct create" "$HS/calls.log" 2>/dev/null; then
+    fail "Container wurde trotz vorhandener Installation neu angelegt"
+else
+    pass "kein pct create (Container wiederverwendet)"
+fi
+
+# ── 13b. Host-Download des Inner-Skripts (nacktes Template ohne curl) ──────
+reset_state
+mkdir -p "$MK/standalone"
+cp "$SCRIPT" "$MK/standalone/${APP_NAME}.sh"
+printf '#!/usr/bin/env bash\necho inner-fake\n' > "$HS/fake-inner.sh"
+t "Host-Download (curl im CT fehlt)"
+start=$SECONDS
+unshare -rm bash "$MK/standalone/${APP_NAME}.sh" --id 222 --yes > "$DIR/out.log" 2>&1
+echo "$?" > "$DIR/rc"
+echo "  (Dauer: $((SECONDS-start))s)"
+assert_exit 0 "$(cat "$DIR/rc")"
+assert_out "auf dem Proxmox-Host"
+assert_out "Übertrage papermark-inner.sh in den Container"
+assert_calls 1 "pct push 222"
+if /bin/grep -q "curl -fsSL" "$HS/calls.log" 2>/dev/null; then
+    fail "curl wurde im Container ausgeführt (soll nicht)"
+else
+    pass "kein curl-Aufruf im Container"
 fi
 
 # ── 14. Patch-Fixtures (Anker-Drift im Inner-Skript) ───────────────────────
