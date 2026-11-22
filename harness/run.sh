@@ -90,8 +90,8 @@ case "$cmd" in
       exit 0
     fi
     case "$*" in
-      *"test -f /etc/papermark/s3.env"*)
-        # Marker für "im Container steckt schon Papermark"
+      *"test -f /etc/papermark/s3.env"*|*"test -f /var/log/papermark-setup.log"*)
+        # Marker für "im Container steckt schon Papermark / abgebrochener Versuch"
         [[ -f "$HS/has_marker" ]] && exit 0
         exit 1
         ;;

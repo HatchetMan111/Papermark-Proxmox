@@ -65,6 +65,7 @@ MAILPIT_DATA="/var/lib/mailpit"
 SETUP_LOG="/var/log/papermark-setup.log"
 DB_NAME="papermark"
 DB_USER="papermark"
+REDIS_UNIT="redis-server"   # wird auf papermark-redis umgestellt, falls das Debian-Paket scheitert
 
 # ── Farben & Logging ───────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
@@ -92,7 +93,7 @@ on_error() {
     info "Letzte 40 Zeilen ${SETUP_LOG}:"
     tail -n 40 "$SETUP_LOG" 2>/dev/null | sed 's/^/    /' || true
     info "Service-Status im Container:"
-    for u in postgresql redis-server papermark-s3 papermark-mailpit \
+    for u in postgresql "${REDIS_UNIT}" papermark-s3 papermark-mailpit \
              papermark-upstash-bridge papermark; do
         printf '    %-28s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null || echo unknown)"
     done
@@ -113,9 +114,60 @@ fi
 # ── Hilfsfunktionen ────────────────────────────────────────────────────────
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Startet eine Unit und wartet kurz; bei Misserfolg gibt es die KOMPLETTE
+# Diagnose aus (status + journal), damit ein Fehler nie nur als "failed"
+# endet. Live-Grube CT 212: genau dieses Detail fehlte beim redis-Start.
+start_unit() {
+    local unit="$1" _
+    systemctl restart "$unit" >/dev/null 2>&1 || true
+    for _ in $(seq 1 15); do
+        if [[ "$(systemctl is-active "$unit" 2>/dev/null)" == "active" ]]; then
+            ok "${unit} aktiv"
+            return 0
+        fi
+        sleep 1
+    done
+    err "${unit} ist nicht aktiv geworden – Diagnose:"
+    systemctl status "$unit" --no-pager -n 15 2>&1 | sed 's/^/    /' || true
+    journalctl -u "$unit" --no-pager -n 30 2>&1 | sed 's/^/    /' || true
+    return 1
+}
+
+# Fallback-Redis: das Debian-Paket scheitert in manchen LXCs (Live CT 212,
+# redis 8.0.2). Wir starten dann eine eigene Instanz mit Minimal-Config –
+# ohne /etc/redis/redis.conf, ohne Logdatei, ohne Drop-Privilegien.
+setup_fallback_redis() {
+    warn "Debian-Redis startet nicht – Fallback: eigene schlanke Redis-Instanz (papermark-redis.service)."
+    systemctl disable redis-server >/dev/null 2>&1 || true
+    systemctl mask redis-server >/dev/null 2>&1 || true
+    cat > /etc/systemd/system/papermark-redis.service <<'EOF'
+[Unit]
+Description=Redis (eigene schlanke Instanz für Papermark)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/redis-server --bind 127.0.0.1 --port 6379 --save "" --appendonly no --daemonize no --supervised no --loglevel notice
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    if start_unit papermark-redis; then
+        REDIS_UNIT="papermark-redis"
+        ok "Fallback-Redis läuft (eigene Instanz statt Debian-Paket)"
+        return 0
+    fi
+    die "Auch die eigene Redis-Instanz startet nicht – siehe Diagnose oben.\n  Ohne Redis kein Login (Login-Codes, Sessions, Rate-Limits)."
+}
+
 # ── 1. Grundpakete ────────────────────────────────────────────────────────
 step "1/9 Grundpakete installieren"
 export DEBIAN_FRONTEND=noninteractive
+export LC_ALL=C
 # Grube aus früheren LXC-Läufen (n8n/ZeitTracking): apt läuft als _apt und stolpert
 # über Resolver-Dateien, die es nicht lesen darf → Sandbox hart auf root stellen.
 # Das ist in Einweg-Containern vertretbar und verhindert den Totalabbruch.
@@ -125,9 +177,16 @@ apt-get "${APT_OPTS[@]}" update -qq
 apt-get "${APT_OPTS[@]}" install -y --no-install-recommends \
     ca-certificates curl wget gnupg git openssl xz-utils tar \
     postgresql redis-server
-systemctl enable postgresql redis-server >/dev/null 2>&1 || true
-systemctl restart postgresql redis-server
-ok "PostgreSQL $(psql --version | awk '{print $3}') und Redis $(redis-server --version | awk '{print $2}') aktiv"
+
+systemctl enable postgresql >/dev/null 2>&1 || true
+start_unit postgresql || die "PostgreSQL lässt sich nicht starten – siehe Diagnose oben."
+ok "PostgreSQL $(psql --version | awk '{print $3}') aktiv"
+
+# Redis einzeln (nicht zusammen mit postgres): ein failed-Dienst darf nicht
+# den Rest blockieren, und die Diagnose muss sichtbar sein.
+if ! start_unit redis-server; then
+    setup_fallback_redis
+fi
 
 # ── 2. Node.js (Binary-Tarball, SHA256-geprüft) ───────────────────────────
 # Kein apt-Node (Debian 13 bringt 20.x, Papermark verlangt >= 22, wir bauen mit
@@ -764,8 +823,8 @@ EOF
 cat > /etc/systemd/system/papermark-upstash-bridge.service <<EOF
 [Unit]
 Description=Upstash-REST-Bridge (Papermark → lokaler Redis)
-After=redis-server.service
-Wants=redis-server.service
+After=${REDIS_UNIT}.service
+Wants=${REDIS_UNIT}.service
 
 [Service]
 Type=simple

@@ -581,9 +581,12 @@ do_install() {
             warn "Container '${CT_HOSTNAME}' (${old_id}) wird mit --force gelöscht und neu angelegt ..."
             run pct stop "$old_id" || true
             run pct destroy "$old_id" --purge
-        elif [[ -n "$old_id" ]] && pct exec "$old_id" -- test -f /etc/papermark/s3.env >/dev/null 2>&1; then
-            # Idempotenz: im Container steckt schon eine Papermark-Installation
-            # (Marker = /etc/papermark/s3.env) → dort fortsetzen/aktualisieren.
+        elif [[ -n "$old_id" ]] && { pct exec "$old_id" -- test -f /etc/papermark/s3.env >/dev/null 2>&1 \
+                || pct exec "$old_id" -- test -f /var/log/papermark-setup.log >/dev/null 2>&1; }; then
+            # Idempotenz: im Container steckt schon Papermark bzw. ein
+            # abgebrochener Versuch (/etc/papermark/s3.env bzw.
+            # /var/log/papermark-setup.log) → dort fortsetzen statt neu anzulegen.
+            # Das macht Retry-Schleifen ohne --force möglich.
             warn "Container '${CT_HOSTNAME}' (${old_id}) enthält bereits Papermark – Installation wird dort fortgesetzt."
             CT_ID="$old_id"
             ensure_ct_running "$CT_ID"
@@ -593,7 +596,7 @@ do_install() {
             print_summary
             return 0
         else
-            die "Hostname '${CT_HOSTNAME}' ist bereits vergeben (Container ${old_id:-?}).\n  Neu anlegen (löscht den Container):  --force\n  Andere ID verwenden:                  --id <freie ID> --hostname <anderer Name>\n  Vorhandene Installation fortsetzen:   einfach erneut ausführen, sobald /etc/papermark/s3.env existiert."
+            die "Hostname '${CT_HOSTNAME}' ist bereits vergeben (Container ${old_id:-?}) und enthält keine Papermark-Spuren.\n  Neu anlegen (löscht den Container):  --force\n  Andere ID verwenden:                  --id <freie ID> --hostname <anderer Name>"
         fi
     fi
 
