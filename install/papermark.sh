@@ -568,13 +568,9 @@ CT_IP_FINAL=""
 
 do_install() {
     # ── Container anlegen ─────────────────────────────────────────────────
-    if [[ -z "$CT_ID" ]]; then
-        CT_ID="$(find_free_id)"
-        info "Verwendete freie Container-ID: ${CT_ID}"
-    fi
-    if pct status "$CT_ID" >/dev/null 2>&1; then
-        die "Container ${CT_ID} existiert bereits.\n  Andere ID wählen (--id) oder --force (löscht den Container!)"
-    fi
+    # 1) Hostnamen-Konflikt zuerst klären (bestimmt, ob überhaupt neu angelegt
+    #    wird) – sonst würde find_free_id erst eine ID "verbrauchen", die dann
+    #    durch den bestehenden Container ersetzt wird.
     if ct_exists "$CT_HOSTNAME"; then
         local old_id; old_id="$(find_ct_id_by_hostname)"
         if [[ "$FORCE_RECREATE" == "true" ]]; then
@@ -598,6 +594,15 @@ do_install() {
         else
             die "Hostname '${CT_HOSTNAME}' ist bereits vergeben (Container ${old_id:-?}) und enthält keine Papermark-Spuren.\n  Neu anlegen (löscht den Container):  --force\n  Andere ID verwenden:                  --id <freie ID> --hostname <anderer Name>"
         fi
+    fi
+
+    # 2) Freie ID bestimmen und Eindeutigkeit prüfen
+    if [[ -z "$CT_ID" ]]; then
+        CT_ID="$(find_free_id)"
+        info "Verwendete freie Container-ID: ${CT_ID}"
+    fi
+    if pct status "$CT_ID" >/dev/null 2>&1; then
+        die "Container ${CT_ID} existiert bereits.\n  Andere ID wählen (--id) oder --force (löscht den Container!)"
     fi
 
     if [[ -z "$CT_PASSWORD" ]]; then
