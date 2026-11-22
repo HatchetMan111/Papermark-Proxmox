@@ -134,7 +134,7 @@ on_error() {
             echo "--- /var/log/papermark-setup.log (letzte 40) ---"
             tail -n 40 /var/log/papermark-setup.log 2>/dev/null
             echo "--- systemctl is-active ---"
-            for u in postgresql redis-server papermark-s3 papermark-mailpit papermark-upstash-bridge papermark; do
+            for u in postgresql redis-server papermark-redis papermark-s3 papermark-mailpit papermark-upstash-bridge papermark; do
                 printf "%-28s %s\n" "$u" "$(systemctl is-active $u 2>/dev/null || echo unknown)"
             done
             echo "--- journalctl papermark (letzte 30) ---"

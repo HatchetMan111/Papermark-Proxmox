@@ -41,6 +41,11 @@
 # =============================================================================
 set -Eeuo pipefail
 
+# WICHTIG (Live-Grube CT 212): `pct exec` startet über lxc-attach mit minimalem
+# PATH – /usr/local/bin fehlt darin. Node landet aber genau dort. Ohne diesen
+# Export läuft die Installation durch, findet aber hinterher "node" nicht.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 # ── Parameter (werden vom Host-Skript gesetzt) ─────────────────────────────
 APP_DIR="${APP_DIR:-/opt/papermark}"
 REPO_URL="${REPO_URL:-https://github.com/papermark/papermark}"
@@ -192,18 +197,38 @@ fi
 # Kein apt-Node (Debian 13 bringt 20.x, Papermark verlangt >= 22, wir bauen mit
 # 24 LTS). Der Tarball wird gegen die offizielle SHASUMS256.txt geprüft.
 step "2/9 Node.js ${NODE_VERSION} einrichten"
-if [[ "$(node -v 2>/dev/null || echo none)" != "v${NODE_VERSION}" ]]; then
+# Version EINMAL sicher einlesen (kein `$(node -v)` im if – würde bei fehlendem
+# node den ERR-Trap in der Sub-Shell feuern und die Ausgabe verwässern).
+NODE_VER=""
+if command -v node >/dev/null 2>&1; then
+    NODE_VER="$(node -v 2>/dev/null || true)"
+fi
+if [[ "$NODE_VER" != "v${NODE_VERSION}" ]]; then
+    info "Installiere Node ${NODE_VERSION} nach /usr/local ..."
     TB="node-v${NODE_VERSION}-linux-x64.tar.xz"
-    curl -fsSL --retry 3 -o "/tmp/${TB}" "https://nodejs.org/dist/v${NODE_VERSION}/${TB}"
-    curl -fsSL --retry 3 -o /tmp/SHASUMS256.txt "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"
+    curl -fsSL --retry 3 -o "/tmp/${TB}" "https://nodejs.org/dist/v${NODE_VERSION}/${TB}" \
+        || die "Node-Download fehlgeschlagen: https://nodejs.org/dist/v${NODE_VERSION}/${TB}"
+    curl -fsSL --retry 3 -o /tmp/SHASUMS256.txt "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" \
+        || die "SHASUMS256.txt konnte nicht geladen werden"
     EXPECT="$(awk -v f="$TB" '$2 == f {print $1}' /tmp/SHASUMS256.txt)"
     [[ -n "$EXPECT" ]] || die "SHA256 für ${TB} nicht in SHASUMS256.txt gefunden"
     echo "${EXPECT}  /tmp/${TB}" | sha256sum -c - >/dev/null \
         || die "SHA256-Prüfung für ${TB} fehlgeschlagen (erwartet ${EXPECT})"
-    tar -xJf "/tmp/${TB}" -C /usr/local --strip-components=1
+    tar -xJf "/tmp/${TB}" -C /usr/local --strip-components=1 \
+        || die "Entpacken von ${TB} nach /usr/local fehlgeschlagen"
     rm -f "/tmp/${TB}" /tmp/SHASUMS256.txt
+    NODE_VER=""
+    if command -v node >/dev/null 2>&1; then
+        NODE_VER="$(node -v 2>/dev/null || true)"
+    fi
 fi
-ok "Node $(node -v), npm $(npm -v)"
+[[ "$NODE_VER" == "v${NODE_VERSION}" ]] \
+    || die "Node ${NODE_VERSION} ist nach der Installation nicht nutzbar (ist '${NODE_VER}').\n  PATH=${PATH}\n  Prüfe: ls -l /usr/local/bin/node"
+NPM_VER="?"
+if command -v npm >/dev/null 2>&1; then
+    NPM_VER="$(npm -v 2>/dev/null || true)"
+fi
+ok "Node ${NODE_VER} (npm ${NPM_VER}) unter $(command -v node)"
 
 # ── 3. PostgreSQL: Rolle + Datenbank ──────────────────────────────────────
 step "3/9 Datenbank ${DB_NAME} vorbereiten"
