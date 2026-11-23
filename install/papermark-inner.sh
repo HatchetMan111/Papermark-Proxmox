@@ -161,6 +161,7 @@ User=root
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
+    systemctl enable papermark-redis >/dev/null 2>&1 || true
     if start_unit papermark-redis; then
         REDIS_UNIT="papermark-redis"
         ok "Fallback-Redis läuft (eigene Instanz statt Debian-Paket)"
@@ -866,7 +867,7 @@ EOF
 cat > /etc/systemd/system/papermark.service <<EOF
 [Unit]
 Description=Papermark (Next.js) – Dokumente teilen, nachverfolgen, Datarooms
-After=network-online.target postgresql.service redis-server.service papermark-s3.service papermark-mailpit.service papermark-upstash-bridge.service
+After=network-online.target postgresql.service ${REDIS_UNIT}.service papermark-s3.service papermark-mailpit.service papermark-upstash-bridge.service
 Wants=network-online.target
 
 [Service]
@@ -957,7 +958,7 @@ systemctl restart papermark
 # ── 9e. Verifikation ─────────────────────────────────────────────────────
 step "Verifikation"
 ALL_OK=1
-for u in postgresql redis-server papermark-s3 papermark-mailpit \
+for u in postgresql "${REDIS_UNIT}" papermark-s3 papermark-mailpit \
          papermark-upstash-bridge papermark; do
     state="$(systemctl is-active "$u" 2>/dev/null || echo failed)"
     if [[ "$state" == "active" ]]; then
