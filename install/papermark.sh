@@ -561,6 +561,15 @@ verify_install() {
         pct exec "$ct_id" -- journalctl -u "$APP_NAME" --no-pager -n 30 2>/dev/null | sed 's/^/    /' || true
         return 1
     fi
+    local health
+    health="$(pct exec "$ct_id" -- curl -s --max-time 8 "http://127.0.0.1:${UI_PORT}/api/health" 2>/dev/null || true)"
+    if grep -q '"status":"ok"' <<<"$health" 2>/dev/null; then
+        ok "App-Health: Datenbank erreichbar"
+    else
+        err "App-Health nicht ok: ${health:-<leer>}"
+        pct exec "$ct_id" -- journalctl -u "$APP_NAME" --no-pager -n 30 2>/dev/null | sed 's/^/    /' || true
+        return 1
+    fi
     CT_IP_FINAL="$ip"
 }
 
@@ -671,6 +680,7 @@ print_summary() {
     echo -e "  Nächste freie ID wäre jetzt: $(find_free_id)"
     echo -e "  Deinstallation: ${ONE_LINER} --uninstall"
     echo -e "  Update:         ${ONE_LINER} --update"
+    echo -e "  Reboot-Test:    pct reboot ${CT_ID}   (danach Web-UI erneut öffnen)"
 }
 
 do_update() {
@@ -724,13 +734,15 @@ do_status() {
         warn "Container läuft nicht – starte mit: pct start ${ct_id}"
         exit 0
     fi
-    for u in postgresql redis-server papermark-s3 papermark-mailpit \
-             papermark-upstash-bridge papermark papermark-ip-sync; do
+    for u in postgresql redis-server papermark-redis papermark-s3 papermark-mailpit \
+             papermark-upstash-bridge papermark; do
         printf '  %-28s %s\n' "$u" "$(pct exec "$ct_id" -- systemctl is-active "$u" 2>/dev/null || echo unknown)"
     done
-    local code
+    local code health
     code="$(pct exec "$ct_id" -- curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${UI_PORT}/login" 2>/dev/null || echo 000)"
+    health="$(pct exec "$ct_id" -- curl -s --max-time 8 "http://127.0.0.1:${UI_PORT}/api/health" 2>/dev/null || true)"
     echo "  HTTP (login): ${code}"
+    echo "  Health:       ${health:-<leer>}"
     echo "  Web-UI:     http://${ip}:${UI_PORT}"
     echo "  Postfach:   http://${ip}:${MAILPIT_WEB_PORT}"
 }

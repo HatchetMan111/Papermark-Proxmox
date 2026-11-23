@@ -174,6 +174,15 @@ EOF
 step "1/9 Grundpakete installieren"
 export DEBIAN_FRONTEND=noninteractive
 export LC_ALL=C
+# Live-Grube (CT 212/203): in frischen LXCs ist /dev/log nicht verbunden, wenn
+# apt läuft – adduser/logger brechen dann mit "returned error: 256" ab und
+# legen z. B. den Systembenutzer 'redis' nicht an (Folge: Unit 217/USER).
+for _ in $(seq 1 20); do
+    systemctl is-active --quiet systemd-journald 2>/dev/null && break
+    sleep 1
+done
+systemctl is-active --quiet systemd-journald 2>/dev/null \
+    || warn "systemd-journald läuft nicht – Paket-Postinsts könnten adduser/logger-Fehler zeigen."
 # Grube aus früheren LXC-Läufen (n8n/ZeitTracking): apt läuft als _apt und stolpert
 # über Resolver-Dateien, die es nicht lesen darf → Sandbox hart auf root stellen.
 # Das ist in Einweg-Containern vertretbar und verhindert den Totalabbruch.
@@ -187,6 +196,17 @@ apt-get "${APT_OPTS[@]}" install -y --no-install-recommends \
 systemctl enable postgresql >/dev/null 2>&1 || true
 start_unit postgresql || die "PostgreSQL lässt sich nicht starten – siehe Diagnose oben."
 ok "PostgreSQL $(psql --version | awk '{print $3}') aktiv"
+
+# Live-Grube: der Systembenutzer 'redis' wird von manchen Postinsts nicht
+# angelegt (adduser scheitert an /dev/log) – die Unit stirbt dann mit
+# 217/USER. Legen wir ihn nach, läuft das Debian-Paket normal (kein Mask nötig).
+if ! id redis >/dev/null 2>&1; then
+    warn "Systembenutzer 'redis' fehlt – lege ihn an (bekannte adduser-Grube)."
+    groupadd --system redis 2>/dev/null || true
+    useradd --system --gid redis --home-dir /var/lib/redis --no-create-home \
+        --shell /usr/sbin/nologin redis 2>/dev/null || true
+fi
+install -d -o redis -g redis -m 0755 /var/lib/redis /var/log/redis /run/redis 2>/dev/null || true
 
 # Redis einzeln (nicht zusammen mit postgres): ein failed-Dienst darf nicht
 # den Rest blockieren, und die Diagnose muss sichtbar sein.
@@ -803,7 +823,14 @@ if [[ "$UPDATE" != "1" && -f .next-build-hash && "$(cat .next-build-hash 2>/dev/
     ok "Build unverändert – übersprungen"
 else
     info "next build (Next.js-Produktions-Build, braucht 3–8 Minuten und ~4 GB RAM) ..."
-    NODE_OPTIONS="--max-old-space-size=4096" npx next build
+    if ! NODE_OPTIONS="--max-old-space-size=4096" npx next build; then
+        err "next build ist fehlgeschlagen."
+        if journalctl -k --no-pager 2>/dev/null | grep -qi "out of memory\|oom-kill"; then
+            err "Der Kernel hat den Build per OOM-Killer beendet → RAM/Swap zu klein."
+            err "  Neu anlegen mit:  --memory 8192 --swap 4096"
+        fi
+        exit 1
+    fi
     echo "$BUILD_HASH" > .next-build-hash
     ok "Build fertig ($(du -sh .next | awk '{print $1}'))"
 fi
@@ -978,10 +1005,21 @@ for _ in $(seq 1 60); do
     sleep 2
 done
 if [[ "$HTTP_CODE" == "200" ]]; then
-    ok "Web-UI antwortet mit HTTP 200"
+    ok "Web-UI antwortet mit HTTP 200 (/login)"
 else
     err "Web-UI antwortet mit HTTP ${HTTP_CODE}"
     journalctl -u papermark --no-pager -n 40 2>/dev/null | sed 's/^/    /' || true
+    ALL_OK=0
+fi
+
+# /api/health macht einen echten DB-Check (SELECT 1) – /login ist statisch und
+# würde auch bei totem Backend 200 liefern.
+HEALTH_BODY="$(curl -s --max-time 8 "http://127.0.0.1:${PORT}/api/health" 2>/dev/null || true)"
+if grep -q '"status":"ok"' <<<"$HEALTH_BODY" 2>/dev/null; then
+    ok "App-Health: Datenbank erreichbar"
+else
+    err "App-Health nicht ok: ${HEALTH_BODY:-<leer>}"
+    journalctl -u papermark --no-pager -n 30 2>/dev/null | sed 's/^/    /' || true
     ALL_OK=0
 fi
 
@@ -993,6 +1031,16 @@ if [[ "$S3_CODE" == "403" || "$S3_CODE" == "200" ]]; then
     ok "S3-Gateway antwortet (HTTP ${S3_CODE})"
 else
     err "S3-Gateway antwortet mit HTTP ${S3_CODE}"
+    ALL_OK=0
+fi
+
+# Mailpit-API prüfen – ohne Postfach kein Login-Code.
+MAILPIT_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${MAILPIT_WEB_PORT}/api/v1/messages" 2>/dev/null || echo 000)"
+if [[ "$MAILPIT_CODE" == "200" ]]; then
+    ok "Mailpit-Postfach antwortet (HTTP 200)"
+else
+    err "Mailpit-Postfach antwortet mit HTTP ${MAILPIT_CODE}"
+    journalctl -u papermark-mailpit --no-pager -n 20 2>/dev/null | sed 's/^/    /' || true
     ALL_OK=0
 fi
 

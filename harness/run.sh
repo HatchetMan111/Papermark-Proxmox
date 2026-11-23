@@ -98,6 +98,7 @@ case "$cmd" in
       *"hostname -I"*)                   echo "$PAPERMARK_HARNESS_IP" ;;
       *"systemctl is-active papermark"*) echo "active" ;;
       *"curl -s -o /dev/null -w"*)       echo "200" ;;
+      *"/api/health"*)                  echo '{"status":"ok","message":"All systems operational"}' ;;
       *"systemctl is-active"*)           echo "active" ;;
       *) : ;;
     esac
