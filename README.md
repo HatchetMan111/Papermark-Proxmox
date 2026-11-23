@@ -129,8 +129,19 @@ Der Selfhosting-Betrieb braucht zwei kleine, dokumentierte Eingriffe (Script
 2. **`lib/auth/auth-options.ts`** – der QStash-Publish beim ersten Login wird in einen
    Guard gepackt. Ohne QStash-Token würde sonst genau dieser Publish mit 500 abbrechen
    und der erste Login scheitern.
-3. **`next.config.mjs`** – `typescript.ignoreBuildErrors` + `eslint.ignoreDuringBuilds`,
-   weil das öffentliche Repo ohne die Enterprise-Dateien Typfehler enthält (siehe unten).
+3. **`next.config.mjs`** – `typescript.ignoreBuildErrors` + `eslint.ignoreDuringBuilds`
+   (Typfehler im OSS-Stand) **und** `/` → `/dashboard` ohne Host-Bedingung: bei Zugriff
+   per `http://<IP>:3000` enthält der Host-Header den Port, die Bedingung würde nie greifen
+   und `/` fiele auf 404 zurück.
+4. **`middleware.ts`** – die eigene App-Domain (IP/Hostname) und private Adressen werden
+   nicht mehr als *Custom-Domain* behandelt. Ohne das schreibt der Domain-Middleware alles
+   nach `/view/domains/<host>/…` um → **404 auf jeder Seite**.
+5. **`lib/middleware/app.ts`** – Redirects (Login, Welcome, `next`) zeigen auf die
+   konfigurierte URL statt auf `localhost`, das Next.js im Middleware einsetzt, wenn die
+   App über eine IP erreichbar ist. Sonst landet man beim Login auf dem eigenen Rechner.
+
+Der Build-Hash im Inner-Skript schließt die Patch-Datei ein – eine Patch-Änderung löst
+also immer einen Neubau aus, auch außerhalb von `--update`.
 
 ---
 

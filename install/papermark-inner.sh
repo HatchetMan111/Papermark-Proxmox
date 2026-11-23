@@ -668,6 +668,147 @@ const patches = [
     ),
     why: "Build trotz fehlender EE-Typen",
   },
+
+  // ── 4) Root-Weiterleitung ohne Host-Bedingung ──────────────────────────
+  // Live-Grube: im Container ist die URL http://<IP>:3000. Der Host-Header
+  // enthält dann den Port ("10.0.0.5:3000"), die Bedingung
+  // `has: [{type:"host", value:"10.0.0.5"}]` greift nie – "/" fällt auf
+  // 404 zurück, obwohl es keine eigene Startseite gibt. Ohne Bedingung
+  // landet man immer auf /dashboard (→ /login, wenn nicht angemeldet).
+  {
+    file: "next.config.mjs",
+    find: L(
+      '        destination: "/dashboard",',
+      "        permanent: false,",
+      "        has: [",
+      "          {",
+      '            type: "host",',
+      "            value: process.env.NEXT_PUBLIC_APP_BASE_HOST,",
+      "          },",
+      "        ],",
+    ),
+    replace: L(
+      '        destination: "/dashboard",',
+      "        permanent: false,",
+      "        // Selfhosting: ohne Host-Bedingung (siehe Kommentar oben).",
+    ),
+    why: "Root / leitet immer auf /dashboard um",
+  },
+
+  // ── 5) IP/Port als App-Domain erkennen (KEINE Custom-Domain) ───────────
+  // Live-Grube (CT 203): middleware.ts behandelt jeden Host, der nicht
+  // localhost/papermark.com ist, als Custom-Domain – bei Zugriff per
+  // http://<CT-IP>:3000 also auch die eigene IP. Der Domain-Middleware
+  // schreibt dann ALLES nach /view/domains/<host>/… um → 404 auf jeder
+  // Seite. Deshalb: eigene App-Domain und private Adressen ausnehmen.
+  {
+    file: "middleware.ts",
+    find: L(
+      "function isCustomDomain(host: string) {",
+      "  return (",
+      '    (process.env.NODE_ENV === "development" &&',
+      '      (host?.includes(".local") || host?.includes("papermark.dev"))) ||',
+      '    (process.env.NODE_ENV !== "development" &&',
+      "      !(",
+      '        host?.includes("localhost") ||',
+      '        host?.includes("papermark.io") ||',
+      '        host?.includes("papermark.com") ||',
+      '        host?.endsWith(".vercel.app")',
+      "      ))",
+      "  );",
+      "}",
+    ),
+    replace: L(
+      "function isCustomDomain(host: string) {",
+      '  const bare = (host || "").split(":")[0].toLowerCase();',
+      '  const appHost = (process.env.NEXT_PUBLIC_APP_BASE_HOST || "")',
+      '    .split(":")[0]',
+      "    .toLowerCase();",
+      "",
+      "  // Selbsthosting (Proxmox-LXC): die eigene App-Domain ist KEINE",
+      "  // Custom-Domain. Ohne das greift der Domain-Middleware und schreibt",
+      "  // alles nach /view/domains/<host>/… um → 404 auf jeder Seite.",
+      "  if (appHost && bare === appHost) return false;",
+      "",
+      "  // Private/localhost-Adressen immer als App behandeln.",
+      "  if (",
+      "    !bare ||",
+      '    bare === "localhost" ||',
+      '    bare === "::1" ||',
+      '    bare.startsWith("127.") ||',
+      '    bare.startsWith("10.") ||',
+      '    bare.startsWith("192.168.") ||',
+      '    /^172\\.(1[6-9]|2\\d|3[01])\\./.test(bare) ||',
+      '    bare.endsWith(".local") ||',
+      '    bare.endsWith(".lan")',
+      "  ) {",
+      "    return false;",
+      "  }",
+      "",
+      "  return (",
+      '    (process.env.NODE_ENV === "development" &&',
+      '      (host?.includes(".local") || host?.includes("papermark.dev"))) ||',
+      '    (process.env.NODE_ENV !== "development" &&',
+      "      !(",
+      '        host?.includes("localhost") ||',
+      '        host?.includes("papermark.io") ||',
+      '        host?.includes("papermark.com") ||',
+      '        host?.endsWith(".vercel.app")',
+      "      ))",
+      "  );",
+      "}",
+    ),
+    why: "IP/Port ist App-Domain, keine Custom-Domain",
+  },
+
+  // ── 6) Redirects auf die konfigurierte URL statt auf "localhost" ────────
+  // Live-Grube: Next.js baut req.url im Middleware mit localhost, wenn die App
+  // über eine IP erreichbar ist. "302 → http://localhost:3000/login" landet
+  // damit auf dem Rechner des Betrachters, nicht im Container.
+  {
+    file: "lib/middleware/app.ts",
+    find: 'const DEFAULT_AUTH_REDIRECT_PATH = "/dashboard";',
+    replace: L(
+      'const DEFAULT_AUTH_REDIRECT_PATH = "/dashboard";',
+      "",
+      "// Selbsthosting: Next.js ersetzt im Middleware den Host durch",
+      '// "localhost", wenn die App über eine IP erreichbar ist – Redirects',
+      "// würden dann auf den localhost des Browsers zeigen. Deshalb die",
+      "// öffentlich konfigurierte Basis-URL verwenden.",
+      "function appOrigin(): string {",
+      "  return (",
+      "    process.env.NEXTAUTH_URL ||",
+      '    process.env.NEXT_PUBLIC_BASE_URL ||',
+      '    "http://localhost:3000"',
+      "  );",
+      "}",
+    ),
+    why: "Basis-URL-Helper für Redirects",
+  },
+  {
+    file: "lib/middleware/app.ts",
+    find: "    const loginUrl = new URL(LOGIN_PATH, req.url);",
+    replace: "    const loginUrl = new URL(LOGIN_PATH, appOrigin());",
+    why: "Login-Redirect auf konfigurierte URL",
+  },
+  {
+    file: "lib/middleware/app.ts",
+    find: "      const canonicalLoginUrl = new URL(LOGIN_PATH, req.url);",
+    replace: "      const canonicalLoginUrl = new URL(LOGIN_PATH, appOrigin());",
+    why: "Kanonical-Login-Redirect auf konfigurierte URL",
+  },
+  {
+    file: "lib/middleware/app.ts",
+    find: '    return NextResponse.redirect(new URL("/welcome", req.url));',
+    replace: '    return NextResponse.redirect(new URL("/welcome", appOrigin()));',
+    why: "Welcome-Redirect auf konfigurierte URL",
+  },
+  {
+    file: "lib/middleware/app.ts",
+    find: "    return NextResponse.redirect(new URL(nextPath, req.url));",
+    replace: "    return NextResponse.redirect(new URL(nextPath, appOrigin()));",
+    why: "next-Redirect auf konfigurierte URL",
+  },
 ];
 
 let applied = 0;
@@ -818,7 +959,9 @@ info "Datenbank-Migrationen einspielen (prisma migrate deploy) ..."
 npx prisma migrate deploy
 ok "Schema auf aktuellem Stand"
 
-BUILD_HASH="$(sha256sum package-lock.json .env next.config.mjs 2>/dev/null | sha256sum | awk '{print $1}')"
+# Achtung: Der Hash muss AUCH die Patch-Datei enthalten – sonst würde eine
+# Änderung an middleware.ts (nicht next.config.mjs) still übersprungen.
+BUILD_HASH="$(sha256sum /tmp/apply-patches.mjs package-lock.json .env next.config.mjs 2>/dev/null | sha256sum | awk '{print $1}')"
 if [[ "$UPDATE" != "1" && -f .next-build-hash && "$(cat .next-build-hash 2>/dev/null)" == "$BUILD_HASH" ]]; then
     ok "Build unverändert – übersprungen"
 else
