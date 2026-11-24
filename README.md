@@ -226,7 +226,7 @@ Häufige Stolpersteine:
 ## Tests
 
 ```bash
-bash harness/run.sh          # 52 Assertions: Host-Skript gemockt + Patch-Fixtures
+bash harness/run.sh          # 69 Assertions: Host-Skript gemockt + Patch-Fixtures
 ```
 
 Der Harness bildet Proxmox per Mocks nach (`pct`, `pveam`, `pvesm`, `pveversion`) und prüft

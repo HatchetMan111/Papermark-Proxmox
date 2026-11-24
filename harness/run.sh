@@ -331,6 +331,26 @@ else
     pass "kein pct create (Container wiederverwendet)"
 fi
 
+# ── 11c. --uninstall mit vorhandenem Container ─────────────────────────────
+reset_state
+echo "211 running webserver papermark" >> "$HS/ct_list"
+t "Deinstall mit Container"
+run_script --uninstall --yes
+assert_exit 0 "$(cat "$DIR/rc")"
+assert_calls 1 "pct stop 211"
+assert_calls 1 "pct destroy 211"
+assert_out "Container 211 gelöscht"
+
+# ── 11d. --status mit laufendem Container ──────────────────────────────────
+reset_state
+echo "211 running webserver papermark" >> "$HS/ct_list"
+t "Status mit Container"
+run_script --status
+assert_exit 0 "$(cat "$DIR/rc")"
+assert_out "Container:  211 (papermark)"
+assert_out "HTTP (login): 200"
+assert_out "Web-UI:     http://${CT_IP}:3000"
+
 # ── 13b. Host-Download des Inner-Skripts (nacktes Template ohne curl) ──────
 reset_state
 mkdir -p "$MK/standalone"
